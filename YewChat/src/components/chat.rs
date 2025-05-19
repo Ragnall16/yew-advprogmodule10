@@ -6,9 +6,16 @@ use yew_agent::{Bridge, Bridged};
 use crate::{User, services::websocket::WebsocketService};
 use crate::services::event_bus::EventBus;
 
+use std::collections::HashMap;
+use web_sys::HtmlSelectElement;
+
 pub enum Msg {
     HandleMsg(String),
     SubmitMessage,
+    ChangeTheme(Theme),
+    ToggleEmojiPicker,
+    AddEmoji(String),
+    AddReaction(usize, String),
 }
 
 #[derive(Deserialize)]
@@ -45,11 +52,33 @@ pub struct Chat {
     wss: WebsocketService,
     messages: Vec<MessageData>,
     _producer: Box<dyn Bridge<EventBus>>,
+    current_theme: Theme,
+    show_emoji_picker: bool,
+    message_reactions: HashMap<usize, HashMap<String, usize>>
 }
+
+#[derive(Clone, PartialEq)]
+pub enum Theme {
+    Light,
+    Dark,
+    Ocean,
+    Forest,
+}
+
+impl Theme {
+    fn get_css_classes(&self) -> &str {
+        match self {
+            Theme::Light => "bg-white text-black",
+            Theme::Dark => "bg-gray-800 text-black",
+            Theme::Ocean => "bg-blue-900 text-black",
+            Theme::Forest => "bg-green-900 text-black",
+        }
+    }
+}
+
 impl Component for Chat {
     type Message = Msg;
     type Properties = ();
-
     fn create(ctx: &Context<Self>) -> Self {
         let (user, _) = ctx
             .link()
@@ -78,6 +107,9 @@ impl Component for Chat {
             chat_input: NodeRef::default(),
             wss,
             _producer: EventBus::bridge(ctx.link().callback(Msg::HandleMsg)),
+            current_theme: Theme::Dark,
+            show_emoji_picker: false,
+            message_reactions: HashMap::new(),
         }
     }
     fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
@@ -132,68 +164,238 @@ impl Component for Chat {
                 };
                 false
             }
+            Msg::ChangeTheme(theme) => {
+                self.current_theme = theme;
+                true
+            },
+            
+            Msg::ToggleEmojiPicker => {
+                self.show_emoji_picker = !self.show_emoji_picker;
+                true
+            },
+            
+            Msg::AddEmoji(emoji) => {
+                let input = self.chat_input.cast::<HtmlInputElement>();
+                if let Some(input) = input {
+                    let current_value = input.value();
+                    input.set_value(&format!("{} {}", current_value, emoji));
+                    self.show_emoji_picker = false;
+                }
+                true
+            },
+            
+            Msg::AddReaction(msg_idx, emoji) => {
+                let reactions = self.message_reactions.entry(msg_idx).or_insert_with(HashMap::new);
+                let count = reactions.entry(emoji).or_insert(0);
+                *count += 1;
+                true
+            },
         }
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
         let submit = ctx.link().callback(|_| Msg::SubmitMessage);
+        let toggle_emoji = ctx.link().callback(|_| Msg::ToggleEmojiPicker);
+        
+        let theme_callback = ctx.link().callback(|e: Event| {
+            let select = e.target_dyn_into::<HtmlSelectElement>().unwrap();
+            let theme = match select.value().as_str() {
+                "light" => Theme::Light,
+                "dark" => Theme::Dark,
+                "ocean" => Theme::Ocean,
+                "forest" => Theme::Forest,
+                _ => Theme::Dark,
+            };
+            Msg::ChangeTheme(theme)
+        });
+
+        let theme_classes = self.current_theme.get_css_classes();
+
+        let mut current_user = String::new();
+        let mut message_index = 0;
+
         html! {
-            <div class="flex w-screen">
-                <div class="flex-none w-56 h-screen bg-gray-100">
-                    <div class="text-xl p-3">{"Users"}</div>
-                    {
-                        self.users.clone().iter().map(|u| {
-                            html!{
-                                <div class="flex m-3 bg-white rounded-lg p-2">
-                                    <div>
-                                        <img class="w-12 h-12 rounded-full" src={u.avatar.clone()} alt="avatar"/>
-                                    </div>
-                                    <div class="flex-grow p-3">
-                                        <div class="flex text-xs justify-between">
-                                            <div>{u.name.clone()}</div>
-                                        </div>
-                                        <div class="text-xs text-gray-400">
-                                            {"Hi there!"}
-                                        </div>
-                                    </div>
-                                </div>
-                            }
-                        }).collect::<Html>()
-                    }
-                </div>
-                <div class="grow h-screen flex flex-col">
-                    <div class="w-full h-14 border-b-2 border-gray-300"><div class="text-xl p-3">{"💬 Chat!"}</div></div>
-                    <div class="w-full grow overflow-auto border-b-2 border-gray-300">
+            <div class={format!("flex w-screen {}", theme_classes)}>
+                <div class="flex-none w-56 h-screen bg-opacity-90 bg-gray-100">
+                    <div class="p-3 flex justify-between items-center">
+                        <div class="text-xl">{"Users"}</div>
+                        <select onchange={theme_callback} class="px-2 py-1 rounded bg-white">
+                            <option value="light" selected={self.current_theme == Theme::Light}>{"☀️ Light"}</option>
+                            <option value="dark" selected={self.current_theme == Theme::Dark}>{"🌙 Dark"}</option>
+                            <option value="ocean" selected={self.current_theme == Theme::Ocean}>{"🌊 Ocean"}</option>
+                            <option value="forest" selected={self.current_theme == Theme::Forest}>{"🌲 Forest"}</option>
+                        </select>
+                    </div>
+                    
+                    <div class="overflow-y-auto max-h-[calc(100vh-80px)]">
                         {
-                            self.messages.iter().map(|m| {
-                                let user = self.users.iter().find(|u| u.name == m.from).unwrap();
+                            self.users.clone().iter().map(|u| {
                                 html!{
-                                    <div class="flex items-end w-3/6 bg-gray-100 m-8 rounded-tl-lg rounded-tr-lg rounded-br-lg ">
-                                        <img class="w-8 h-8 rounded-full m-3" src={user.avatar.clone()} alt="avatar"/>
-                                        <div class="p-3">
-                                            <div class="text-sm">
-                                                {m.from.clone()}
+                                    <div class="flex m-3 bg-white rounded-lg p-2 shadow-sm hover:shadow-md transition-shadow duration-200">
+                                        <div>
+                                            <img class="w-12 h-12 rounded-full border-2 border-gray-200" src={u.avatar.clone()} alt="avatar"/>
+                                        </div>
+                                        <div class="flex-grow p-3">
+                                            <div class="flex text-xs justify-between font-bold">
+                                                <div>{u.name.clone()}</div>
                                             </div>
-                                            <div class="text-xs text-gray-500">
-                                                if m.message.ends_with(".gif") {
-                                                    <img class="mt-3" src={m.message.clone()}/>
-                                                } else {
-                                                    {m.message.clone()}
-                                                }
+                                            <div class="text-xs text-gray-400">
+                                                {"Online"}
                                             </div>
                                         </div>
                                     </div>
                                 }
                             }).collect::<Html>()
                         }
-
                     </div>
-                    <div class="w-full h-14 flex px-3 items-center">
-                        <input ref={self.chat_input.clone()} type="text" placeholder="Message" class="block w-full py-2 pl-4 mx-3 bg-gray-100 rounded-full outline-none focus:text-gray-700" name="message" required=true />
-                        <button onclick={submit} class="p-3 shadow-sm bg-blue-600 w-10 h-10 rounded-full flex justify-center items-center color-white">
-                            <svg fill="#000000" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="fill-white">
-                                <path d="M0 0h24v24H0z" fill="none"></path><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
-                            </svg>
-                        </button>
+                </div>
+                
+                <div class="grow h-screen flex flex-col">
+                    <div class="w-full h-14 border-b-2 border-gray-300 flex items-center justify-between px-4">
+                        <div class="text-xl font-bold">{"💬 Chat Room"}</div>
+                        <div class="text-sm text-gray-500">{format!("{} Active Users", self.users.len())}</div>
+                    </div>
+                    
+                    <div class="w-full grow overflow-auto border-b-2 border-gray-300 p-4">
+                        {
+                            self.messages.iter().map(|m| {
+                                let user_profile = self.users.iter()
+                                    .find(|u| u.name == m.from)
+                                    .cloned()
+                                    .unwrap_or_else(|| UserProfile {
+                                        name: m.from.clone(),
+                                        avatar: format!("https://avatars.dicebear.com/api/adventurer-neutral/{}.svg", m.from)
+                                    });
+                                
+                                let is_new_user = current_user != m.from;
+                                current_user = m.from.clone();
+                                
+                                let msg_idx = message_index;
+                                message_index += 1;
+                                
+                                let reactions = self.message_reactions.get(&msg_idx).cloned().unwrap_or_default();
+                                
+                                let add_reaction = ctx.link().callback(move |emoji: String| {
+                                    Msg::AddReaction(msg_idx, emoji)
+                                });
+                                
+                                html!{
+                                    <div class={if is_new_user { "mt-6" } else { "mt-1" }}>
+                                        if is_new_user {
+                                            <div class="flex items-center mb-1">
+                                                <img class="w-8 h-8 rounded-full mr-2" src={user_profile.avatar.clone()} alt="avatar"/>
+                                                <div class="font-medium">{user_profile.name.clone()}</div>
+                                            </div>
+                                        }
+                                        <div class={format!("flex flex-col ml-{}", if is_new_user { "0" } else { "10" })}>
+                                            <div class="max-w-3/4 bg-gray-100 p-3 rounded-lg shadow-sm">
+                                                if m.message.ends_with(".gif") {
+                                                    <img class="max-h-64 rounded" src={m.message.clone()}/>
+                                                } else {
+                                                    <div class="text-sm whitespace-pre-wrap break-words">
+                                                        {m.message.clone()}
+                                                    </div>
+                                                }
+                                            </div>
+                                            
+                                            if !reactions.is_empty() {
+                                                <div class="flex mt-1 ml-2 flex-wrap">
+                                                    {
+                                                        reactions.iter().map(|(emoji, count)| {
+                                                            let emoji_clone = emoji.clone();
+                                                            html! {
+                                                                <button 
+                                                                    onclick={add_reaction.reform(move |_| emoji_clone.clone())}
+                                                                    class="bg-gray-200 rounded-full px-2 py-1 text-xs mr-1 mb-1"
+                                                                >
+                                                                    {format!("{} {}", emoji, count)}
+                                                                </button>
+                                                            }
+                                                        }).collect::<Html>()
+                                                    }
+                                                </div>
+                                            }
+                                            
+                                            <div class="flex mt-1 ml-2">
+                                                <button 
+                                                    onclick={add_reaction.reform(move |_| "👍".to_string())}
+                                                    class="text-gray-500 hover:text-gray-700 text-xs mr-2"
+                                                >
+                                                    {"👍"}
+                                                </button>
+                                                <button 
+                                                    onclick={add_reaction.reform(move |_| "❤️".to_string())}
+                                                    class="text-gray-500 hover:text-gray-700 text-xs mr-2"
+                                                >
+                                                    {"❤️"}
+                                                </button>
+                                                <button 
+                                                    onclick={add_reaction.reform(move |_| "😂".to_string())}
+                                                    class="text-gray-500 hover:text-gray-700 text-xs mr-2"
+                                                >
+                                                    {"😂"}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                            }).collect::<Html>()
+                        }
+                    </div>
+                    
+                    <div class="w-full flex flex-col px-3 py-2 relative">
+                        if self.show_emoji_picker {
+                            <div class="absolute bottom-16 right-5 bg-white shadow-lg rounded-lg p-2 w-64 h-48 overflow-auto">
+                                <div class="grid grid-cols-8 gap-1">
+                                    {
+                                        ["😀", "😂", "😊", "🥰", "😍", "😎", "🙄", "😴", 
+                                        "🤔", "🤯", "😱", "🥳", "😭", "😡", "🤢", "👍",
+                                        "👎", "👏", "🙏", "💪", "🤝", "❤️", "💔", "💯",
+                                        "🔥", "💩", "🎉", "✨", "🌈", "⭐", "🎁", "🏆"]
+                                            .iter()
+                                            .map(|emoji| {
+                                                let emoji_str = emoji.to_string();
+                                                let emoji_callback = ctx.link().callback(move |_| {
+                                                    Msg::AddEmoji(emoji_str.clone())
+                                                });
+                                                html! {
+                                                    <button 
+                                                        onclick={emoji_callback} 
+                                                        class="text-2xl hover:bg-gray-100 rounded p-1"
+                                                    >
+                                                        {*emoji}
+                                                    </button>
+                                                }
+                                            })
+                                            .collect::<Html>()
+                                    }
+                                </div>
+                            </div>
+                        }
+                        
+                        <div class="flex items-center">
+                            <input 
+                                ref={self.chat_input.clone()} 
+                                type="text" 
+                                placeholder="Type a message..." 
+                                class="block w-full py-2 pl-4 mx-3 bg-gray-100 rounded-full outline-none focus:ring-2 focus:ring-blue-600" 
+                                name="message" 
+                                required=true 
+                            />
+                            <button 
+                                onclick={toggle_emoji} 
+                                class="p-3 bg-gray-200 rounded-full flex justify-center items-center mr-2 hover:bg-gray-300"
+                            >
+                                {"😊"}
+                            </button>
+                            <button 
+                                onclick={submit} 
+                                class="p-3 shadow-sm bg-blue-600 w-10 h-10 rounded-full flex justify-center items-center hover:bg-blue-700 transition-colors duration-200"
+                            >
+                                <svg fill="#000000" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="fill-white w-5 h-5">
+                                    <path d="M0 0h24v24H0z" fill="none"></path><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
